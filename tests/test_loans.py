@@ -146,3 +146,24 @@ def test_22_returned_loans_are_no_longer_active(client, session_factory):
     client.post(f"/loans/{loan_id}/return")
     assert count_loans(session_factory, active_only=True) == 0
     assert count_loans(session_factory) == 1  # the loan record itself is kept
+
+
+# ------------------------------------------- one active loan per alias/title ----
+def test_extra_same_alias_cannot_hold_two_copies_of_same_title(client, session_factory):
+    assert borrow(client, alias="finch").status_code == 201
+    second = borrow(client, alias="finch")
+    assert second.status_code == 409
+    assert "already has an active loan" in second.json()["detail"]
+    assert count_loans(session_factory) == 1
+    assert available(client, "B1") == 1
+
+
+def test_extra_same_alias_can_borrow_again_after_returning(client):
+    loan_id = borrow(client, alias="finch").json()["id"]
+    client.post(f"/loans/{loan_id}/return")
+    assert borrow(client, alias="finch").status_code == 201
+
+
+def test_extra_same_alias_can_borrow_different_titles(client):
+    assert borrow(client, book_id="B1", alias="finch").status_code == 201
+    assert borrow(client, book_id="B3", alias="finch").status_code == 201
