@@ -4,8 +4,9 @@ Key rules implemented here:
   available copies = total_copies - (loans with returned = false)
   overdue          = current_day > due_day AND returned = false
   due_day          = checkout_day + 7
+  one alias may hold only ONE active loan per title (our documented decision)
 """
-from sqlalchemy import Boolean, Integer, String, func, insert, literal, select, update
+from sqlalchemy import Boolean, Integer, String, and_, exists, func, insert, literal, select, update
 from sqlalchemy.orm import Session
 
 from app.models import Book, Loan
@@ -64,7 +65,8 @@ def get_book(db: Session, book_id: str) -> BookOut:
 
 # ---------------------------------------------------------------- loans ----
 def borrow_book(db: Session, book_id: str, borrower_alias: str, checkout_day: int) -> Loan:
-    """Create a loan if (and only if) a copy is available.
+    """Create a loan if (and only if) a copy is available and this alias does not
+    already hold an active loan for the same title.
 
     The availability check and the INSERT are ONE SQL statement
     (INSERT ... SELECT ... WHERE available > 0). SQLite runs a single statement
@@ -83,6 +85,11 @@ def borrow_book(db: Session, book_id: str, borrower_alias: str, checkout_day: in
         .where(Loan.book_id == book_id, Loan.returned.is_(False))
         .scalar_subquery()
     )
+    already_holds = exists().where(
+        Loan.book_id == book_id,
+        func.lower(Loan.borrower_alias) == borrower_alias.lower(),
+        Loan.returned.is_(False),
+    )
     stmt = (
         insert(Loan)
         .from_select(
@@ -93,15 +100,19 @@ def borrow_book(db: Session, book_id: str, borrower_alias: str, checkout_day: in
                 literal(checkout_day, Integer),
                 literal(due_day, Integer),
                 literal(False, Boolean),
-            ).where(available > 0),
+            ).where(and_(available > 0, ~already_holds)),
         )
         .returning(Loan.id)
     )
 
     try:
         new_loan_id = db.execute(stmt).scalar_one_or_none()
-        if new_loan_id is None:  # the WHERE clause found no free copy: nothing inserted
+        if new_loan_id is None:  # the WHERE clause refused: nothing was inserted
             db.rollback()
+            if db.scalar(select(already_holds)):
+                raise ConflictError(
+                    f"'{borrower_alias}' already has an active loan for '{book.title}'."
+                )
             raise ConflictError(f"No copies of '{book.title}' are currently available.")
         db.commit()
     except ConflictError:
